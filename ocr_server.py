@@ -6,10 +6,15 @@ import io
 from PIL import Image, ImageOps, ImageFilter
 import re
 from typing import List, Dict
+import logging
 
 app = FastAPI(title="OCR EasyOCR Service")
 
-# Permitir CORS (ajusta origins en producción)
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,13 +23,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Crea el reader una vez (costoso)
-reader = easyocr.Reader(['en'], gpu=False)  # gpu=True si tu host tiene CUDA
+# Inicializar EasyOCR de forma lazy (cuando se necesite)
+_reader = None
+
+def get_reader():
+    global _reader
+    if _reader is None:
+        logger.info("Inicializando EasyOCR...")
+        # Configuración optimizada para memoria
+        _reader = easyocr.Reader(
+            ['en'], 
+            gpu=False,
+            model_storage_directory='./model',
+            download_enabled=True,
+            detector=True,
+            recognizer=True
+        )
+        logger.info("EasyOCR inicializado")
+    return _reader
 
 def preprocess_pil_image(pil_image: Image.Image) -> Image.Image:
-    img = pil_image.convert("RGB")
-    img = ImageOps.autocontrast(img, cutoff=1)
-    img = img.convert("L")  # grayscale
+    """Preprocesamiento optimizado"""
+    img = pil_image.convert("L")  # Grayscale directamente
+    img = ImageOps.autocontrast(img, cutoff=2)
     img = img.filter(ImageFilter.MedianFilter(size=3))
     return img
 
@@ -37,11 +58,15 @@ def clean_text(text: str) -> str:
 
 @app.post("/ocr")
 async def perform_ocr(file: UploadFile = File(...)) -> Dict[str, List[Dict[str, str]]]:
-    if file.content_type.split('/')[0] != 'image':
+    if not file.content_type or file.content_type.split('/')[0] != 'image':
         raise HTTPException(status_code=400, detail="Archivo no es una imagen")
 
     try:
         bytes_img = await file.read()
+        # Limitar tamaño de imagen (optimización memoria)
+        if len(bytes_img) > 10 * 1024 * 1024:  # 10MB max
+            raise HTTPException(status_code=400, detail="Imagen demasiado grande")
+            
         pil_img = Image.open(io.BytesIO(bytes_img))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error abriendo imagen: {e}")
@@ -49,12 +74,12 @@ async def perform_ocr(file: UploadFile = File(...)) -> Dict[str, List[Dict[str, 
     pil_proc = preprocess_pil_image(pil_img)
 
     try:
-        results = reader.readtext(pil_proc)
+        reader = get_reader()  # Lazy initialization
+        results = reader.readtext(pil_proc, detail=0)  # Solo texto, menos detalle
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en EasyOCR: {e}")
 
-    lines = [res[1] for res in results]
-    text_all = " ".join(lines)
+    text_all = " ".join(results)
     text_clean = clean_text(text_all)
 
     # Regex para zonas y temperaturas
@@ -73,7 +98,7 @@ async def perform_ocr(file: UploadFile = File(...)) -> Dict[str, List[Dict[str, 
         zonas_norm.append(z_up)
 
     # Normalizar temps
-    temps_norm = [t.replace('C','').replace('c','').replace(',','.') .strip() for t in temps]
+    temps_norm = [t.replace('C','').replace('c','').replace(',','.').strip() for t in temps]
 
     # Emparejar por orden
     paired = []
@@ -82,3 +107,7 @@ async def perform_ocr(file: UploadFile = File(...)) -> Dict[str, List[Dict[str, 
         paired.append({"zona": zonas_norm[i], "valor": temps_norm[i]})
 
     return {"results": paired}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "OCR EasyOCR Service"}
