@@ -1,6 +1,7 @@
-fastapi
-uvicorn[standard]
-easyocr
-pillow
-python-multipart
-numpy
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+easyocr==1.7.0
+pillow==10.0.1
+python-multipart==0.0.6
+torch==2.0.1+cpu --index-url https://download.pytorch.org/whl/cpu
+torchvision==0.15.2+cpu --index-url https://download.pytorch.org/whl/cpu
